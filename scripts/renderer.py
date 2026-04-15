@@ -222,7 +222,7 @@ class Renderer:
         next_input = 3
 
         # Add avatar inputs if enabled
-        avatar_inputs = []
+        # Avatar inputs tracked via next_input counter
         if self.avatar_enabled and self.avatar_idle_path and self.avatar_speaking_path:
             inputs.extend(["-i", self.avatar_idle_path])    # [3] idle avatar
             inputs.extend(["-i", self.avatar_speaking_path])  # [4] speaking avatar
@@ -237,7 +237,8 @@ class Renderer:
         filters.append(
             f"[1:a]volume={self.bgm_base_volume}[bgm_quiet]"
         )
-        # Apply sidechain compression: BGM ducks when dub speaks
+        # Apply sidechain compression: dub triggers ducking of BGM
+        # sidechaincompress input order: [signal_to_compress][sidechain_key]
         filters.append(
             f"[bgm_quiet][2:a]sidechaincompress="
             f"threshold={self.bgm_duck_threshold}:"
@@ -248,7 +249,7 @@ class Renderer:
         )
         # Mix ducked BGM + dub voice
         filters.append(
-            "[bgm_ducked][2:a]amix=inputs=2:duration=first:dropout_transition=2[audio_out]"
+            "[bgm_ducked][2:a]amix=inputs=2:duration=longest:dropout_transition=2[audio_out]"
         )
 
         # ── Video processing ──
@@ -321,12 +322,26 @@ class Renderer:
             "-map", "[audio_out]",
         ]
 
-        # Try hardware encoding, fall back to software
+        # Use hardware encoding (NVENC) with software fallback
+        # Check if NVENC is available by trying it
+        import shutil
+        use_nvenc = shutil.which("ffmpeg") is not None  # Always try NVENC first on GPU instance
+
+        if use_nvenc:
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", self.nvenc_preset,
+                "-rc", "vbr",
+                "-cq", str(self.nvenc_cq),
+            ])
+        else:
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+            ])
+
         cmd.extend([
-            "-c:v", "h264_nvenc",
-            "-preset", self.nvenc_preset,
-            "-rc", "vbr",
-            "-cq", str(self.nvenc_cq),
             "-c:a", "aac",
             "-b:a", self.audio_bitrate,
             "-movflags", "+faststart",

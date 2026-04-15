@@ -5,6 +5,7 @@ Async batch TTS generation with dual provider support and checkpoint recovery.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -238,7 +239,6 @@ class TTSGenerator:
             audio_content = result["audioContent"]
 
         # Decode base64 audio
-        import base64
         audio_bytes = base64.b64decode(audio_content)
 
         async with aiofiles.open(output_path, "wb") as f:

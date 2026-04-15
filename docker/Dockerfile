@@ -20,10 +20,12 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 # ── Install Be Vietnam Pro font ──────────────────────────
 RUN mkdir -p /usr/share/fonts/truetype/bevietnam && \
+    wget -q "https://github.com/bettergui/BeVietnamPro/archive/refs/heads/master.zip" -O /tmp/bevietnam.zip || \
     wget -q "https://fonts.google.com/download?family=Be+Vietnam+Pro" -O /tmp/bevietnam.zip && \
-    unzip /tmp/bevietnam.zip -d /usr/share/fonts/truetype/bevietnam/ && \
+    unzip -o /tmp/bevietnam.zip '*.ttf' -d /usr/share/fonts/truetype/bevietnam/ 2>/dev/null; \
+    find /tmp -name '*.ttf' -exec cp {} /usr/share/fonts/truetype/bevietnam/ \; 2>/dev/null; \
     fc-cache -fv && \
-    rm /tmp/bevietnam.zip
+    rm -f /tmp/bevietnam.zip
 
 # ── SSH server setup (for n8n SSH node) ──────────────────
 RUN mkdir /var/run/sshd && \
