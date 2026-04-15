@@ -1,0 +1,58 @@
+# ═══════════════════════════════════════════════════════════
+# Video Localization Pipeline — .gitignore
+# ═══════════════════════════════════════════════════════════
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ─────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Secrets & Config (NEVER commit API keys) ─────────────
+config/config.env
+*.env
+!config/config.env.example
+
+# ── Workspace / Processing artifacts ─────────────────────
+workspace/
+/workspace/
+*.wav
+*.mp3
+*.mp4
+*.mkv
+*.ass
+status.json
+timing_data.json
+transcript.json
+translation.json
+chunks_meta.json
+tts_chunks/
+full_dub.wav
+output_*.mp4
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+pipeline.log
+
+# ── OS files ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Docker ───────────────────────────────────────────────
+.dockerignore

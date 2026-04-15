@@ -1,0 +1,669 @@
+{
+  "name": "Video Localization — Full Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "localize",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook: Receive URL",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "localize-pipeline"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://console.vast.ai/api/v0/bundles/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "{\"gpu_name\":{\"in\":[\"RTX 4060 Ti\",\"RTX 3090\",\"RTX 4070 Ti\"]},\"rentable\":{\"eq\":true},\"dph_total\":{\"lte\":0.15},\"cuda_max_good\":{\"gte\":12.1},\"disk_space\":{\"gte\":40}}"
+            },
+            {
+              "name": "order",
+              "value": "[[\"dph_total\",\"asc\"]]"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "search-gpu",
+      "name": "Vast.ai: Search Cheapest GPU",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [470, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vast-api-key",
+          "name": "Vast.ai API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://console.vast.ai/api/v0/asks/{{ $json.offers[0].id }}/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"client_id\": \"me\",\n  \"image\": \"{{ $env.VAST_DOCKER_IMAGE || 'your_dockerhub_user/video-localize:latest' }}\",\n  \"disk\": 40,\n  \"label\": \"localize-job-a\",\n  \"onstart\": \"cd /app && echo 'Ready'\",\n  \"runtype\": \"ssh\"\n}",
+        "options": {}
+      },
+      "id": "create-instance-a",
+      "name": "Vast.ai: Create Instance (Job A)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [690, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vast-api-key",
+          "name": "Vast.ai API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "wait-instance-ready",
+      "name": "Wait: Instance Boot (30s)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://console.vast.ai/api/v0/instances/{{ $('Vast.ai: Create Instance (Job A)').item.json.new_contract }}/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "check-instance-status",
+      "name": "Vast.ai: Check Instance Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vast-api-key",
+          "name": "Vast.ai API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "instance-running",
+              "leftValue": "={{ $json.instances[0].actual_status }}",
+              "rightValue": "running",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-instance-ready",
+      "name": "IF: Instance Running?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "command": "=cd /app/scripts && python pipeline.py --mode job_a --url \"{{ $('Webhook: Receive URL').item.json.body.url }}\" --work-dir /workspace --config /app/config/config.env 2>&1",
+        "options": {
+          "timeout": 600
+        }
+      },
+      "id": "ssh-job-a",
+      "name": "SSH: Run Job A",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1570, 200],
+      "credentials": {
+        "sshPassword": {
+          "id": "vast-ssh",
+          "name": "Vast.ai SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the translation JSON from SSH output\nconst output = $input.first().json.stdout || '';\nconst match = output.match(/===TRANSLATION_OUTPUT_START===\\n([\\s\\S]*?)\\n===TRANSLATION_OUTPUT_END===/)\n\nif (!match) {\n  throw new Error('Could not parse translation output from Job A');\n}\n\nconst translation = JSON.parse(match[1]);\nconst instanceId = $('Vast.ai: Create Instance (Job A)').item.json.new_contract;\nconst videoUrl = $('Webhook: Receive URL').item.json.body.url;\n\n// Format for Telegram review\nlet reviewText = '🎬 *Translation Review*\\n\\n';\nreviewText += `📹 Source: ${videoUrl}\\n`;\nreviewText += `📝 Segments: ${translation.segments.length}\\n\\n`;\n\n// Show first 10 segments as preview\nconst preview = translation.segments.slice(0, 10);\nfor (const seg of preview) {\n  reviewText += `*[${seg.start.toFixed(1)}s]* ${seg.original}\\n`;\n  reviewText += `➡️ ${seg.translated}\\n\\n`;\n}\n\nif (translation.segments.length > 10) {\n  reviewText += `_...and ${translation.segments.length - 10} more segments_\\n`;\n}\n\nreturn [{\n  json: {\n    translation: translation,\n    instanceId: instanceId,\n    videoUrl: videoUrl,\n    reviewText: reviewText,\n    segmentCount: translation.segments.length\n  }\n}];"
+      },
+      "id": "parse-translation",
+      "name": "Code: Parse Translation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1790, 200]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://console.vast.ai/api/v0/instances/{{ $json.instanceId }}/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "destroy-instance-a",
+      "name": "Vast.ai: Destroy Instance (Job A)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2010, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vast-api-key",
+          "name": "Vast.ai API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $('Code: Parse Translation').item.json.reviewText }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "reply_markup": {
+            "inline_keyboard": [
+              [
+                {
+                  "text": "✅ Approve",
+                  "callback_data": "approve"
+                },
+                {
+                  "text": "❌ Reject",
+                  "callback_data": "reject"
+                }
+              ]
+            ]
+          }
+        }
+      },
+      "id": "telegram-send-review",
+      "name": "Telegram: Send for Review",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2230, 200],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-bot",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": ["callback_query"],
+        "additionalFields": {}
+      },
+      "id": "telegram-trigger",
+      "name": "Telegram: Approval Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 600],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-bot",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-approved",
+              "leftValue": "={{ $json.callback_query.data }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-approved",
+      "name": "IF: Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [470, 600]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://console.vast.ai/api/v0/bundles/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "{\"gpu_name\":{\"in\":[\"RTX 4060 Ti\",\"RTX 3090\",\"RTX 4070 Ti\"]},\"rentable\":{\"eq\":true},\"dph_total\":{\"lte\":0.15},\"cuda_max_good\":{\"gte\":12.1},\"disk_space\":{\"gte\":40}}"
+            },
+            {
+              "name": "order",
+              "value": "[[\"dph_total\",\"asc\"]]"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "search-gpu-b",
+      "name": "Vast.ai: Search GPU (Job B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [690, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vast-api-key",
+          "name": "Vast.ai API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://console.vast.ai/api/v0/asks/{{ $json.offers[0].id }}/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"client_id\": \"me\",\n  \"image\": \"{{ $env.VAST_DOCKER_IMAGE || 'your_dockerhub_user/video-localize:latest' }}\",\n  \"disk\": 40,\n  \"label\": \"localize-job-b\",\n  \"onstart\": \"cd /app && echo 'Ready'\",\n  \"runtype\": \"ssh\"\n}",
+        "options": {}
+      },
+      "id": "create-instance-b",
+      "name": "Vast.ai: Create Instance (Job B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [910, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vast-api-key",
+          "name": "Vast.ai API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "wait-instance-b",
+      "name": "Wait: Instance Boot (Job B)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1130, 500]
+    },
+    {
+      "parameters": {
+        "command": "=cd /app/scripts && python pipeline.py --mode job_b --work-dir /workspace --config /app/config/config.env 2>&1",
+        "options": {
+          "timeout": 1800
+        }
+      },
+      "id": "ssh-job-b",
+      "name": "SSH: Run Job B (Render)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1350, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "vast-ssh",
+          "name": "Vast.ai SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse output file paths from Job B\nconst output = $input.first().json.stdout || '';\nconst match = output.match(/===OUTPUT_FILES_START===\\n([\\s\\S]*?)\\n===OUTPUT_FILES_END===/);\n\nif (!match) {\n  throw new Error('Could not parse output files from Job B');\n}\n\nconst outputFiles = JSON.parse(match[1]);\nconst instanceId = $('Vast.ai: Create Instance (Job B)').item.json.new_contract;\n\nreturn [{\n  json: {\n    outputFiles: outputFiles,\n    instanceId: instanceId,\n    horizontalFile: outputFiles.find(f => f.includes('horizontal')),\n    verticalFile: outputFiles.find(f => f.includes('vertical')),\n  }\n}];"
+      },
+      "id": "parse-output",
+      "name": "Code: Parse Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1570, 500]
+    },
+    {
+      "parameters": {
+        "command": "=scp root@{{ $('Vast.ai: Create Instance (Job B)').item.json.public_ipaddr }}:/workspace/output_vi_horizontal.mp4 /tmp/output_vi_horizontal.mp4 && scp root@{{ $('Vast.ai: Create Instance (Job B)').item.json.public_ipaddr }}:/workspace/output_vi_vertical.mp4 /tmp/output_vi_vertical.mp4",
+        "options": {}
+      },
+      "id": "sftp-retrieve",
+      "name": "SFTP: Retrieve Videos",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1790, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "vast-ssh",
+          "name": "Vast.ai SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://console.vast.ai/api/v0/instances/{{ $('Code: Parse Output').item.json.instanceId }}/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "destroy-instance-b",
+      "name": "Vast.ai: Destroy Instance (Job B)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2010, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vast-api-key",
+          "name": "Vast.ai API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=✅ *Pipeline Complete!*\n\n📹 Horizontal (YouTube): Ready\n📱 Vertical (TikTok/Shorts): Ready\n\nFiles saved locally. Ready for upload.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-complete",
+      "name": "Telegram: Send Completion",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2230, 500],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-bot",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "❌ Translation rejected. Pipeline stopped.",
+        "additionalFields": {}
+      },
+      "id": "telegram-rejected",
+      "name": "Telegram: Rejected",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [690, 700],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-bot",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook: Receive URL": {
+      "main": [
+        [
+          {
+            "node": "Vast.ai: Search Cheapest GPU",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vast.ai: Search Cheapest GPU": {
+      "main": [
+        [
+          {
+            "node": "Vast.ai: Create Instance (Job A)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vast.ai: Create Instance (Job A)": {
+      "main": [
+        [
+          {
+            "node": "Wait: Instance Boot (30s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait: Instance Boot (30s)": {
+      "main": [
+        [
+          {
+            "node": "Vast.ai: Check Instance Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vast.ai: Check Instance Status": {
+      "main": [
+        [
+          {
+            "node": "IF: Instance Running?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Instance Running?": {
+      "main": [
+        [
+          {
+            "node": "SSH: Run Job A",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait: Instance Boot (30s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SSH: Run Job A": {
+      "main": [
+        [
+          {
+            "node": "Code: Parse Translation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Parse Translation": {
+      "main": [
+        [
+          {
+            "node": "Vast.ai: Destroy Instance (Job A)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vast.ai: Destroy Instance (Job A)": {
+      "main": [
+        [
+          {
+            "node": "Telegram: Send for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram: Approval Trigger": {
+      "main": [
+        [
+          {
+            "node": "IF: Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Approved?": {
+      "main": [
+        [
+          {
+            "node": "Vast.ai: Search GPU (Job B)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vast.ai: Search GPU (Job B)": {
+      "main": [
+        [
+          {
+            "node": "Vast.ai: Create Instance (Job B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vast.ai: Create Instance (Job B)": {
+      "main": [
+        [
+          {
+            "node": "Wait: Instance Boot (Job B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait: Instance Boot (Job B)": {
+      "main": [
+        [
+          {
+            "node": "SSH: Run Job B (Render)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SSH: Run Job B (Render)": {
+      "main": [
+        [
+          {
+            "node": "Code: Parse Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Parse Output": {
+      "main": [
+        [
+          {
+            "node": "SFTP: Retrieve Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SFTP: Retrieve Videos": {
+      "main": [
+        [
+          {
+            "node": "Vast.ai: Destroy Instance (Job B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vast.ai: Destroy Instance (Job B)": {
+      "main": [
+        [
+          {
+            "node": "Telegram: Send Completion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "video-localization"
+    }
+  ],
+  "triggerCount": 2,
+  "pinData": {}
+}
